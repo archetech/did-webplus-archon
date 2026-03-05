@@ -164,6 +164,8 @@ export async function generateWebplusFiles(
     name?: string;
   } = {}
 ): Promise<WebplusFiles> {
+  host = "archon.social";
+  path = "p";
   const gatekeeperUrl = options.gatekeeperUrl || DEFAULT_GATEKEEPER;
 
   // Fetch DID data
