@@ -164,8 +164,9 @@ export async function generateWebplusFiles(
     name?: string;
   } = {}
 ): Promise<WebplusFiles> {
-  host = "archon.social";
-  path = "p";
+  // Allow environment variable overrides
+  host = process.env.ARCHON_WEBPLUS_HOST || host;
+  path = process.env.ARCHON_WEBPLUS_PATH || path;
   const gatekeeperUrl = options.gatekeeperUrl || DEFAULT_GATEKEEPER;
 
   // Fetch DID data
