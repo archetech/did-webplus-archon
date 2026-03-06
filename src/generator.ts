@@ -1,24 +1,48 @@
 /**
  * did:webplus Generator for Archon Protocol
  * Generates did-documents.jsonl microledger from did:cid identifiers
+ * 
+ * Updated to match did:webplus spec v2 (March 2026):
+ * - updateRules field for authorization
+ * - proofs array (JWS format) instead of selfSignature fields
+ * - kid field in publicKeyJwk with full DID + query params
+ * - verificationMethod[].id includes selfHash and versionId query params
  */
 
+import * as crypto from 'crypto';
+
 export interface WebplusDocument {
-  '@context': string[];
   id: string;
-  versionId: number;
-  validFrom: string;
   selfHash: string;
-  selfSignature: string;
-  selfSignatureVerifier: string;
   prevDIDDocumentSelfHash?: string;
-  verificationMethod: any[];
+  updateRules: {
+    hashedKey?: string;  // For root document
+    key?: string;        // For subsequent updates
+  };
+  proofs?: string[];     // JWS compact serialization
+  validFrom: string;
+  versionId: number;
+  verificationMethod: WebplusVerificationMethod[];
   authentication: string[];
   assertionMethod: string[];
+  keyAgreement?: string[];
   capabilityInvocation: string[];
   capabilityDelegation?: string[];
   service?: any[];
   alsoKnownAs?: string[];
+}
+
+export interface WebplusVerificationMethod {
+  id: string;
+  type: string;
+  controller: string;
+  publicKeyJwk: {
+    kid: string;
+    kty: string;
+    crv: string;
+    x: string;
+    y?: string;  // For EC keys
+  };
 }
 
 export interface WebplusFiles {
@@ -87,12 +111,90 @@ async function fetchDidData(didCid: string, gatekeeperUrl: string = DEFAULT_GATE
 }
 
 /**
- * Generate a self-signature placeholder
- * In production, this would be an actual ECDSA signature
+ * Hash a public key for updateRules.hashedKey
+ * Uses SHA-256 with base64url multibase encoding
  */
-function generateSelfSignature(document: any, keyId: string): string {
-  // Placeholder - in production this would be actual signature
-  return `ECDSA_SECP256K1_SIGNATURE_BY_${keyId}`;
+function hashPublicKey(publicKeyJwk: any): string {
+  const keyBytes = JSON.stringify(publicKeyJwk);
+  const hash = crypto.createHash('sha256').update(keyBytes).digest();
+  // base64url multibase prefix 'u'
+  return 'u' + hash.toString('base64url');
+}
+
+/**
+ * Encode public key for updateRules.key
+ * Uses base64url multibase encoding
+ */
+function encodePublicKey(publicKeyJwk: any): string {
+  const keyBytes = JSON.stringify(publicKeyJwk);
+  // base64url multibase prefix 'u'
+  return 'u' + Buffer.from(keyBytes).toString('base64url');
+}
+
+/**
+ * Generate a JWS proof placeholder
+ * In production, this would be an actual Ed25519/ECDSA signature in JWS compact form
+ */
+function generateProof(document: any, keyId: string, algorithm: string = 'ES256K'): string {
+  // JWS header
+  const header = {
+    alg: algorithm,
+    kid: keyId,
+    crit: ['b64'],
+    b64: false
+  };
+  
+  // In production: sign the document payload
+  // For now, generate a placeholder that shows the structure
+  const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
+  const signaturePlaceholder = Buffer.from(`SIGNATURE_PLACEHOLDER_FOR_${document.selfHash}`).toString('base64url');
+  
+  // JWS compact serialization: header..signature (no payload for detached)
+  return `${headerB64}..${signaturePlaceholder}`;
+}
+
+/**
+ * Build the verification method ID with query params per spec
+ */
+function buildVerificationMethodId(
+  webplusDid: string,
+  selfHash: string,
+  versionId: number,
+  keyIndex: number
+): string {
+  return `${webplusDid}?selfHash=${selfHash}&versionId=${versionId}#${keyIndex}`;
+}
+
+/**
+ * Convert Archon verification method to did:webplus format
+ */
+function convertVerificationMethod(
+  vm: any,
+  webplusDid: string,
+  selfHash: string,
+  versionId: number,
+  keyIndex: number
+): WebplusVerificationMethod {
+  const vmId = buildVerificationMethodId(webplusDid, selfHash, versionId, keyIndex);
+  
+  // Determine key type
+  let type = 'JsonWebKey2020';
+  if (vm.type) {
+    type = vm.type;
+  }
+  
+  // Build publicKeyJwk with kid
+  const publicKeyJwk = {
+    kid: vmId,
+    ...vm.publicKeyJwk
+  };
+  
+  return {
+    id: vmId,
+    type,
+    controller: webplusDid,
+    publicKeyJwk
+  };
 }
 
 /**
@@ -105,31 +207,46 @@ function createWebplusDocument(
   selfHash: string,
   prevSelfHash: string | undefined,
   didDoc: any,
-  didData: any
+  didData: any,
+  isRoot: boolean
 ): WebplusDocument {
-  // Get the key ID for self-signature verification
-  const keyId = didDoc.verificationMethod?.[0]?.id || '#key-1';
+  // Convert verification methods
+  const verificationMethods: WebplusVerificationMethod[] = (didDoc.verificationMethod || [])
+    .map((vm: any, index: number) => convertVerificationMethod(
+      vm, webplusDid, selfHash, versionId, index
+    ));
+  
+  // Get primary key for updateRules and proofs
+  const primaryKey = verificationMethods[0];
+  const primaryKeyJwk = primaryKey?.publicKeyJwk;
+  
+  // Build updateRules based on whether this is root or update
+  const updateRules: { hashedKey?: string; key?: string } = {};
+  if (isRoot && primaryKeyJwk) {
+    // Root document uses hashedKey
+    updateRules.hashedKey = hashPublicKey(primaryKeyJwk);
+  } else if (primaryKeyJwk) {
+    // Update document uses key (unhashed)
+    updateRules.key = encodePublicKey(primaryKeyJwk);
+  }
+  
+  // Build verification method references (just the fragment)
+  const keyRefs = verificationMethods.map((_, index) => `#${index}`);
   
   const doc: WebplusDocument = {
-    '@context': [
-      'https://www.w3.org/ns/did/v1',
-      'https://w3id.org/security/suites/jws-2020/v1'
-    ],
     id: webplusDid,
-    versionId,
-    validFrom,
     selfHash,
-    selfSignature: generateSelfSignature({ selfHash, versionId }, keyId),
-    selfSignatureVerifier: keyId,
-    verificationMethod: didDoc.verificationMethod?.map((vm: any) => ({
-      ...vm,
-      controller: webplusDid
-    })) || [],
-    authentication: didDoc.authentication || [keyId],
-    assertionMethod: didDoc.assertionMethod || [keyId],
-    capabilityInvocation: [keyId], // Required for did:webplus - defines who can update
+    updateRules,
+    validFrom,
+    versionId,
+    verificationMethod: verificationMethods,
+    authentication: keyRefs,
+    assertionMethod: keyRefs,
+    keyAgreement: keyRefs,
+    capabilityInvocation: keyRefs,
+    capabilityDelegation: keyRefs,
     alsoKnownAs: [
-      `did:cid:${selfHash}`,
+      `did:cid:${extractAid(didDoc.id || selfHash)}`,
       `did:web:${webplusDid.split(':')[2]}:${selfHash}`
     ]
   };
@@ -137,6 +254,13 @@ function createWebplusDocument(
   // Add prevDIDDocumentSelfHash for non-root documents
   if (prevSelfHash) {
     doc.prevDIDDocumentSelfHash = prevSelfHash;
+  }
+  
+  // Add proofs for non-root documents (root doesn't require proofs)
+  if (!isRoot && primaryKey) {
+    doc.proofs = [
+      generateProof(doc, primaryKey.id, 'ES256K')
+    ];
   }
 
   // Add credentials from manifest as service endpoints
@@ -191,7 +315,8 @@ export async function generateWebplusFiles(
     aid, // Root self-hash is the AID
     undefined, // No previous for root
     didDoc,
-    didData
+    didData,
+    true // isRoot
   );
   microledger.push(rootDoc);
 
@@ -206,7 +331,8 @@ export async function generateWebplusFiles(
       metadata.versionId, // Current version's self-hash
       aid, // Previous is the root (simplified - full history would chain all versions)
       didDoc,
-      didData
+      didData,
+      false // isRoot
     );
     microledger.push(currentDoc);
   }
